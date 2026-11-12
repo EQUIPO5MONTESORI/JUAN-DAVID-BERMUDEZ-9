@@ -6,22 +6,31 @@ const sendBtn = document.getElementById("send-btn");
 // La key NO se escribe en este archivo (así no se filtra en GitHub).
 // La primera vez la página la pide y la guarda en ese computador.
 function obtenerKey() {
-    let key = localStorage.getItem("geminiKey");
+    let key = "";
+    try { key = localStorage.getItem("geminiKey") || ""; } catch (e) {}
     if (!key) {
         key = (prompt("Pega la API key de la profe:") || "").trim();
-        if (key) localStorage.setItem("geminiKey", key);
+        if (key) {
+            try { localStorage.setItem("geminiKey", key); } catch (e) {}
+        }
     }
     return key;
 }
 
 window.onload = () => {
-    const savedChat = localStorage.getItem("chatHistory");
+    let savedChat = null;
+    try { savedChat = localStorage.getItem("chatHistory"); } catch (e) {}
 
-    // Si el chat guardado tiene un error viejo, no lo cargamos
-    if (savedChat && !savedChat.includes("no longer available") && !savedChat.includes("high demand")) {
+    // Si el chat guardado quedó con un mensaje de error o pegado, no lo cargamos
+    if (
+        savedChat &&
+        !savedChat.includes("no longer available") &&
+        !savedChat.includes("high demand") &&
+        !savedChat.includes("AI is typing")
+    ) {
         chatBox.innerHTML = savedChat;
     } else {
-        localStorage.removeItem("chatHistory");
+        try { localStorage.removeItem("chatHistory"); } catch (e) {}
     }
 
     chatBox.scrollTop = chatBox.scrollHeight;
@@ -57,9 +66,14 @@ async function getBotReplay(userMessage) {
         const url = "https://generativelanguage.googleapis.com/v1beta/models/" + modelo + ":generateContent";
 
         for (let intento = 0; intento < 2; intento++) {
+            // Si Gemini no responde en 20 segundos, se cancela y se reintenta
+            const controlador = new AbortController();
+            const temporizador = setTimeout(() => controlador.abort(), 20000);
+
             try {
                 const response = await fetch(url, {
                     method: "POST",
+                    signal: controlador.signal,
                     headers: {
                         "Content-Type": "application/json",
                         "x-goog-api-key": apiKey
@@ -70,16 +84,17 @@ async function getBotReplay(userMessage) {
                 });
 
                 const data = await response.json();
+                clearTimeout(temporizador);
 
                 if (response.ok) {
                     return data.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't get that.";
                 }
 
-                console.error("API Error (" + modelo + "):", data);
+                console.error("API Error (" + modelo + "):", response.status, data);
 
                 // Key mala o desactivada
                 if (response.status === 400 || response.status === 401 || response.status === 403) {
-                    localStorage.removeItem("geminiKey");
+                    try { localStorage.removeItem("geminiKey"); } catch (e) {}
                     return "La API key no sirve. Recarga la página y pega una key válida.";
                 }
 
@@ -94,13 +109,18 @@ async function getBotReplay(userMessage) {
 
                 return (data && data.error && data.error.message) || "Error fetching response.";
             } catch (error) {
-                console.error("Catch Error:", error);
+                clearTimeout(temporizador);
+                console.error("Catch Error (" + modelo + "):", error);
+
+                // Se demoró demasiado: reintenta
+                if (error.name === "AbortError") continue;
+
                 return "Error de conexión.";
             }
         }
     }
 
-    return "Gemini está muy ocupado en este momento. Espera unos segundos e intenta de nuevo.";
+    return "Gemini está muy ocupado o tardó demasiado. Espera unos segundos e intenta de nuevo.";
 }
 
 sendBtn.onclick = async () => {
@@ -110,13 +130,19 @@ sendBtn.onclick = async () => {
     userInput.value = "";
 
     const typingDiv = showTyping();
+    let botReplay;
 
-    const botReplay = await getBotReplay(message);
+    try {
+        botReplay = await getBotReplay(message);
+    } catch (error) {
+        console.error("Error inesperado:", error);
+        botReplay = "Ocurrió un error inesperado. Intenta de nuevo.";
+    }
+
     typingDiv.remove();
-
     addMessage(botReplay, "bot-message");
 
-    localStorage.setItem("chatHistory", chatBox.innerHTML);
+    try { localStorage.setItem("chatHistory", chatBox.innerHTML); } catch (e) {}
 };
 
 userInput.addEventListener("keypress", (e) => {
